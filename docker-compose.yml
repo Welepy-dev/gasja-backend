@@ -1,0 +1,16 @@
+# Base de dados para desenvolvimento local: docker compose up -d
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: gasja
+      POSTGRES_PASSWORD: gasja
+      POSTGRES_DB: gasja
+    ports:
+      - '5432:5432'
+    volumes:
+      - dados:/var/lib/postgresql/data
+      - ./docker/criar-base-teste.sql:/docker-entrypoint-initdb.d/criar-base-teste.sql:ro
+
+volumes:
+  dados:

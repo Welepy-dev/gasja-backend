@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: gasja
+          POSTGRES_PASSWORD: gasja
+          POSTGRES_DB: gasja_teste
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gasja"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://gasja:gasja@localhost:5432/gasja_teste
+      DATABASE_URL_TESTE: postgresql://gasja:gasja@localhost:5432/gasja_teste
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint:check
+      - run: npm run build
+      - run: npm test
+      - run: npm run test:e2e

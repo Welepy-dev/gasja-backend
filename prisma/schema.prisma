@@ -1,0 +1,428 @@
+// Modelo de dados do GásJá.
+// Regra de base: o núcleo (pedidos, preço, despacho, pagamentos) não sabe de que canal veio o pedido.
+// Os canais (chamada, sms, app, whatsapp, messenger...) são texto aberto, não enum, para que um canal
+// novo não obrigue a mudar o esquema.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Contas ----------
+
+enum PerfilUtilizador {
+  OPERADOR
+  SUPERVISOR
+  ADMIN
+}
+
+/// Pessoal da central (operadores, supervisores, administradores).
+model Utilizador {
+  id            String           @id @default(uuid())
+  nome          String
+  email         String           @unique
+  passwordHash  String
+  perfil        PerfilUtilizador @default(OPERADOR)
+  activo        Boolean          @default(true)
+  criadoEm      DateTime         @default(now())
+  actualizadoEm DateTime         @updatedAt
+
+  pedidosCriados Pedido[] @relation("PedidoCriadoPor")
+}
+
+/// Agente de campo que entrega as botijas.
+model Condutor {
+  id              String    @id @default(uuid())
+  nome            String
+  telefone        String    @unique
+  pinHash         String
+  veiculo         String?
+  matricula       String?
+  activo          Boolean   @default(true)
+  disponivel      Boolean   @default(false)
+  ultimaLat       Float?
+  ultimaLng       Float?
+  ultimaPosicaoEm DateTime?
+  criadoEm        DateTime  @default(now())
+  actualizadoEm   DateTime  @updatedAt
+
+  pedidos    Pedido[]
+  pagamentos Pagamento[]
+}
+
+// ---------- Clientes e camada de canais ----------
+
+/// Cliente único, identificado pelo número de telemóvel (formato +244XXXXXXXXX).
+model Cliente {
+  id            String   @id @default(uuid())
+  telefone      String   @unique
+  nome          String?
+  notas         String?
+  criadoEm      DateTime @default(now())
+  actualizadoEm DateTime @updatedAt
+
+  identidades IdentidadeCanal[]
+  moradas     Morada[]
+  pedidos     Pedido[]
+  mensagens   MensagemEntrada[]
+}
+
+/// Ligação entre um identificador de canal e o cliente.
+/// Ex.: (sms, +244923000000), (whatsapp, 244923000000), (messenger, PSID).
+model IdentidadeCanal {
+  id            String   @id @default(uuid())
+  clienteId     String
+  canal         String
+  identificador String
+  criadoEm      DateTime @default(now())
+
+  cliente Cliente @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+
+  @@unique([canal, identificador])
+  @@index([clienteId])
+}
+
+model Morada {
+  id            String   @id @default(uuid())
+  clienteId     String
+  nome          String   @default("Casa")
+  bairroId      String?
+  descricao     String
+  referencia    String?
+  lat           Float?
+  lng           Float?
+  /// true depois de o condutor marcar o ponto exacto na 1.ª entrega
+  gpsConfirmado Boolean  @default(false)
+  criadoEm      DateTime @default(now())
+  actualizadoEm DateTime @updatedAt
+
+  cliente Cliente  @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+  bairro  Bairro?  @relation(fields: [bairroId], references: [id])
+  pedidos Pedido[]
+
+  @@index([clienteId])
+}
+
+// ---------- Preço (tudo configurável, nada fixo no código) ----------
+
+/// Tipo de botija e o preço oficial da recarga.
+model Produto {
+  id            String   @id @default(uuid())
+  codigo        String   @unique // ex.: "12KG", "51KG"
+  nome          String
+  pesoKg        Int
+  /// Preço oficial da recarga, em Kz.
+  precoRecarga  Int
+  activo        Boolean  @default(true)
+  criadoEm      DateTime @default(now())
+  actualizadoEm DateTime @updatedAt
+
+  tarifas TarifaEntrega[]
+  itens   ItemPedido[]
+}
+
+/// Zona de distância. A zona 0 (levantamento no ponto) não é guardada aqui: é sempre grátis.
+model ZonaEntrega {
+  id             String   @id @default(uuid())
+  numero         Int      @unique
+  nome           String
+  /// Limite superior da zona em km (inclusive). null = fora de zona (sem limite, preço por km).
+  kmMax          Float?
+  /// Fora de zona: o pedido exige orçamento confirmado pela central.
+  exigeOrcamento Boolean  @default(false)
+  activo         Boolean  @default(true)
+  criadoEm       DateTime @default(now())
+  actualizadoEm  DateTime @updatedAt
+
+  tarifas TarifaEntrega[]
+  bairros Bairro[]
+  pedidos Pedido[]
+}
+
+/// Taxa de entrega de uma zona para um tipo de botija.
+model TarifaEntrega {
+  id         String @id @default(uuid())
+  zonaId     String
+  produtoId  String
+  /// Taxa base da zona, em Kz.
+  valor      Int
+  /// Só para zonas sem limite: valor por km acima do início da zona.
+  valorPorKm Int    @default(0)
+
+  zona    ZonaEntrega @relation(fields: [zonaId], references: [id], onDelete: Cascade)
+  produto Produto     @relation(fields: [produtoId], references: [id], onDelete: Cascade)
+
+  @@unique([zonaId, produtoId])
+}
+
+/// Bairro classificado por zona. Por chamada e SMS é o bairro que dá a zona, sem GPS.
+model Bairro {
+  id        String   @id @default(uuid())
+  nome      String
+  municipio String
+  zonaId    String?
+  lat       Float?
+  lng       Float?
+  activo    Boolean  @default(true)
+  criadoEm  DateTime @default(now())
+
+  zona    ZonaEntrega? @relation(fields: [zonaId], references: [id])
+  moradas Morada[]
+
+  @@unique([nome, municipio])
+}
+
+/// Ponto de venda / armazém de onde se mede a distância.
+model Deposito {
+  id       String   @id @default(uuid())
+  nome     String
+  lat      Float
+  lng      Float
+  activo   Boolean  @default(true)
+  criadoEm DateTime @default(now())
+
+  pedidos Pedido[]
+}
+
+/// Parâmetros de preço gerais (ex.: percentagem paga por botija adicional).
+model Configuracao {
+  chave         String   @id
+  valor         String
+  actualizadoEm DateTime @updatedAt
+}
+
+// ---------- Pedidos ----------
+
+enum EstadoPedido {
+  RECEBIDO // entrou por um canal, à espera do "sim" do cliente
+  CONFIRMADO // cliente confirmou o preço; por atribuir
+  ATRIBUIDO // central atribuiu a um condutor
+  ACEITE // condutor aceitou
+  RECOLHIDO // condutor recolheu a botija cheia
+  A_CAMINHO
+  NO_LOCAL
+  ENTREGUE
+  CANCELADO
+  FALHADO
+}
+
+enum TipoEntrega {
+  ENTREGA
+  LEVANTAMENTO // zona 0, sem taxa
+}
+
+enum MetodoPagamento {
+  NUMERARIO
+  MULTICAIXA_EXPRESS
+}
+
+enum EstadoPagamento {
+  PENDENTE
+  PAGO
+  FALHOU
+}
+
+model Pedido {
+  id              String          @id @default(uuid())
+  /// Número curto mostrado à central, ao condutor e ao cliente (#2841).
+  numero          Int             @unique @default(autoincrement())
+  clienteId       String
+  moradaId        String?
+  canal           String
+  estado          EstadoPedido    @default(RECEBIDO)
+  tipoEntrega     TipoEntrega     @default(ENTREGA)
+  metodoPagamento MetodoPagamento
+  estadoPagamento EstadoPagamento @default(PENDENTE)
+  trocaVazia      Boolean         @default(true)
+  nota            String?
+
+  // Preço, guardado no momento do pedido (a tabela pode mudar depois).
+  depositoId      String?
+  zonaId          String?
+  zonaNumero      Int     @default(0)
+  distanciaKm     Float?
+  subtotalRecarga Int
+  taxaEntrega     Int
+  total           Int
+
+  /// Código que o cliente dá ao condutor na entrega.
+  codigoEntrega    String
+  condutorId       String?
+  criadoPorId      String?
+  mensagemOrigemId String?   @unique
+  confirmadoEm     DateTime?
+  atribuidoEm      DateTime?
+  entregueEm       DateTime?
+  canceladoEm      DateTime?
+  motivoFim        String?
+  criadoEm         DateTime  @default(now())
+  actualizadoEm    DateTime  @updatedAt
+
+  cliente        Cliente          @relation(fields: [clienteId], references: [id])
+  morada         Morada?          @relation(fields: [moradaId], references: [id])
+  deposito       Deposito?        @relation(fields: [depositoId], references: [id])
+  zona           ZonaEntrega?     @relation(fields: [zonaId], references: [id])
+  condutor       Condutor?        @relation(fields: [condutorId], references: [id])
+  criadoPor      Utilizador?      @relation("PedidoCriadoPor", fields: [criadoPorId], references: [id])
+  mensagemOrigem MensagemEntrada? @relation(fields: [mensagemOrigemId], references: [id])
+  itens          ItemPedido[]
+  eventos        EventoPedido[]
+  pagamentos     Pagamento[]
+  mensagensSaida MensagemSaida[]
+
+  @@index([estado])
+  @@index([clienteId])
+  @@index([condutorId, estado])
+  @@index([criadoEm])
+}
+
+model ItemPedido {
+  id            String @id @default(uuid())
+  pedidoId      String
+  produtoId     String
+  quantidade    Int
+  /// Preço oficial no momento do pedido, em Kz.
+  precoUnitario Int
+  subtotal      Int
+
+  pedido  Pedido  @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+  produto Produto @relation(fields: [produtoId], references: [id])
+
+  @@index([pedidoId])
+}
+
+enum TipoEvento {
+  ESTADO
+  PROBLEMA
+  NOTA
+}
+
+/// Histórico do pedido: mudanças de estado e problemas reportados.
+model EventoPedido {
+  id         String        @id @default(uuid())
+  pedidoId   String
+  tipo       TipoEvento    @default(ESTADO)
+  deEstado   EstadoPedido?
+  paraEstado EstadoPedido?
+  /// "utilizador", "condutor", "cliente" ou "sistema"
+  autorTipo  String
+  autorId    String?
+  motivo     String?
+  dados      Json?
+  lat        Float?
+  lng        Float?
+  /// Id gerado no telemóvel do condutor: torna a sincronização offline idempotente.
+  idLocal    String?       @unique
+  /// Quando aconteceu no terreno (pode ser antes de chegar ao servidor).
+  ocorridoEm DateTime      @default(now())
+  criadoEm   DateTime      @default(now())
+
+  pedido Pedido @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+
+  @@index([pedidoId])
+}
+
+// ---------- Mensagens (caixa de entrada única) ----------
+
+enum EstadoMensagem {
+  NOVA
+  DUVIDA // interpretação incompleta, a central tem de validar
+  CONVERTIDA // deu origem a um pedido
+  RESPOSTA // resposta a um pedido existente (SIM / NAO)
+  IGNORADA
+}
+
+/// Mensagem normalizada recebida de qualquer canal de texto.
+model MensagemEntrada {
+  id            String         @id @default(uuid())
+  canal         String
+  remetente     String
+  clienteId     String?
+  texto         String
+  lat           Float?
+  lng           Float?
+  conversaId    String?
+  idExterno     String?
+  estado        EstadoMensagem @default(NOVA)
+  interpretacao Json?
+  tratadaPorId  String?
+  recebidaEm    DateTime       @default(now())
+  actualizadoEm DateTime       @updatedAt
+
+  cliente Cliente? @relation(fields: [clienteId], references: [id])
+  pedido  Pedido?
+
+  @@unique([canal, idExterno])
+  @@index([estado])
+  @@index([clienteId])
+}
+
+enum EstadoEnvio {
+  PENDENTE
+  ENVIADA
+  FALHOU
+}
+
+/// Notificações enviadas ao cliente (confirmação, a caminho, entregue...).
+model MensagemSaida {
+  id        String      @id @default(uuid())
+  canal     String
+  destino   String
+  texto     String
+  pedidoId  String?
+  estado    EstadoEnvio @default(PENDENTE)
+  erro      String?
+  idExterno String?
+  criadoEm  DateTime    @default(now())
+  enviadaEm DateTime?
+
+  pedido Pedido? @relation(fields: [pedidoId], references: [id])
+
+  @@index([pedidoId])
+}
+
+// ---------- Pagamentos ----------
+
+model Pagamento {
+  id                String          @id @default(uuid())
+  pedidoId          String
+  metodo            MetodoPagamento
+  valor             Int
+  estado            EstadoPagamento @default(PENDENTE)
+  /// Referência do gateway Multicaixa Express.
+  referenciaExterna String?         @unique
+  /// Numerário: condutor que recebeu o dinheiro.
+  condutorId        String?
+  confirmadoEm      DateTime?
+  /// Numerário: quando o supervisor fechou a caixa do condutor (fase 1).
+  conciliadoEm      DateTime?
+  dados             Json?
+  criadoEm          DateTime        @default(now())
+  actualizadoEm     DateTime        @updatedAt
+
+  pedido   Pedido    @relation(fields: [pedidoId], references: [id], onDelete: Cascade)
+  condutor Condutor? @relation(fields: [condutorId], references: [id])
+
+  @@index([pedidoId])
+  @@index([condutorId, conciliadoEm])
+}
+
+// ---------- Auditoria ----------
+
+model RegistoAuditoria {
+  id         String   @id @default(uuid())
+  actorTipo  String
+  actorId    String?
+  accao      String
+  entidade   String
+  entidadeId String?
+  dados      Json?
+  criadoEm   DateTime @default(now())
+
+  @@index([entidade, entidadeId])
+  @@index([criadoEm])
+}
